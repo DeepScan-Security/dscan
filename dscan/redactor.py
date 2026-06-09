@@ -45,6 +45,12 @@ _API_KEY_RES = (
     re.compile(r"\bsk-[A-Za-z0-9]{16,}"),            # generic OpenAI
 )
 
+# Credentials embedded in a connection URL: scheme://user:password@host.
+# Only the password is redacted; the scheme, user, and host are kept.
+_URL_CRED_RE = re.compile(
+    r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]*:)([^\s:/@]+)(@)"
+)
+
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 
 # US phone numbers (optional +1, separators required). The lookarounds
@@ -149,6 +155,7 @@ def _redact_string(text: str) -> str:
     text = _AWS_RE.sub("[REDACTED:AWS_KEY]", text)
     for pattern in _API_KEY_RES:
         text = pattern.sub("[REDACTED:API_KEY]", text)
+    text = _URL_CRED_RE.sub(r"\1[REDACTED:PASSWORD]\3", text)
     text = _EMAIL_RE.sub("[REDACTED:EMAIL]", text)
     text = _redact_credit_cards(text)
     text = _SSN_RE.sub("[REDACTED:SSN]", text)

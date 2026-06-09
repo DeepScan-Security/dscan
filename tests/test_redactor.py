@@ -154,6 +154,37 @@ class TestHighEntropy:
 
 
 # --------------------------------------------------------------------------
+# URL-embedded credentials (connection strings)
+# --------------------------------------------------------------------------
+class TestUrlCredentials:
+    def test_redacts_db_password(self):
+        assert (
+            redact("postgresql://admin:FAKE_PASSWORD_xyz789@localhost/prod")
+            == "postgresql://admin:[REDACTED:PASSWORD]@localhost/prod"
+        )
+
+    def test_redacts_password_keeps_user_and_host(self):
+        assert (
+            redact("mysql://root:s3cr3t@db:3306/app")
+            == "mysql://root:[REDACTED:PASSWORD]@db:3306/app"
+        )
+
+    def test_redacts_in_sentence(self):
+        out = redact("connect to redis://:authpass@cache:6379 now")
+        assert out == "connect to redis://:[REDACTED:PASSWORD]@cache:6379 now"
+
+    def test_redacts_connection_in_dict(self):
+        data = {"connection": "postgresql://u:p4ssw0rd@h/db"}
+        assert redact(data)["connection"] == "postgresql://u:[REDACTED:PASSWORD]@h/db"
+
+    def test_does_not_touch_url_without_password(self):
+        assert redact("https://api.example.com/v1/users") == "https://api.example.com/v1/users"
+
+    def test_does_not_touch_url_with_port_only(self):
+        assert redact("http://host:8080/path") == "http://host:8080/path"
+
+
+# --------------------------------------------------------------------------
 # General "should not redact" cases
 # --------------------------------------------------------------------------
 class TestShouldNotRedact:
