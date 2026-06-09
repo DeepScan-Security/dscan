@@ -51,8 +51,11 @@ _current_session: contextvars.ContextVar["_Session | None"] = contextvars.Contex
 class _Session:
     """Per-``@watch``-invocation state."""
 
-    def __init__(self, tracer: Tracer) -> None:
+    def __init__(self, tracer: Tracer, trail: Any | None = None) -> None:
         self.tracer = tracer
+        # Optional TrailAnalyzer; when set, each recorded tool call is fed
+        # to it and any findings are attached to the trace.
+        self.trail = trail
         # Tasks for traces scheduled from synchronous call sites; awaited
         # before the agent wrapper returns.
         self.pending: list[asyncio.Task[Any]] = []
@@ -81,13 +84,52 @@ async def _emit(
 ) -> None:
     red_params, flagged = _redact_and_flag(params)
     red_result = _redact_copy(result)
+    flag_reason = "secrets_in_params" if flagged else None
+    await _finalize(
+        session,
+        tool=tool,
+        red_params=red_params,
+        red_result=red_result,
+        duration_ms=duration_ms,
+        flagged=flagged,
+        flag_reason=flag_reason,
+    )
+
+
+async def _finalize(
+    session: _Session,
+    *,
+    tool: str,
+    red_params: Any,
+    red_result: Any,
+    duration_ms: float,
+    flagged: bool,
+    flag_reason: str | None,
+) -> None:
+    """Run trail analysis (if enabled) on the redacted entry, then record.
+
+    A CRITICAL trail finding overrides the flag: ``flagged`` becomes True
+    and ``flag_reason`` becomes ``"trail:<PATTERN>"``.
+    """
+    trail_findings: list[Any] | None = None
+    if session.trail is not None:
+        new = session.trail.analyze_incremental(
+            {"tool": tool, "params": red_params, "result": red_result}
+        )
+        trail_findings = [f.to_dict() for f in new]
+        critical = next((f for f in new if f.severity == "critical"), None)
+        if critical is not None:
+            flagged = True
+            flag_reason = f"trail:{critical.pattern}"
+
     await session.tracer.record(
         tool=tool,
         params=red_params,
         result=red_result,
         duration_ms=duration_ms,
         flagged=flagged,
-        flag_reason="secrets_in_params" if flagged else None,
+        flag_reason=flag_reason,
+        trail_findings=trail_findings,
     )
 
 
@@ -101,10 +143,11 @@ async def _trace_response(session: _Session, response: Any, duration_ms: float) 
             continue
         tool_input = getattr(block, "input", {}) or {}
         red_params, flagged = _redact_and_flag(tool_input)
-        await session.tracer.record(
+        await _finalize(
+            session,
             tool=getattr(block, "name", "unknown"),
-            params=red_params,
-            result=None,  # the tool has not executed at request time
+            red_params=red_params,
+            red_result=None,  # the tool has not executed at request time
             duration_ms=duration_ms,
             flagged=flagged,
             flag_reason="secrets_in_params" if flagged else None,
@@ -254,15 +297,21 @@ def watch(
     func: Callable[..., Any] | None = None,
     *,
     name: str | None = None,
+    trail: Any | None = None,
 ) -> Callable[..., Any]:
     """Instrument an async agent function.
 
     Use as ``@watch`` or ``@watch(name="custom")``. The agent name is
     resolved as ``name`` > ``$DSCAN_AGENT_NAME`` > the function's
     ``__name__``.
+
+    Pass ``trail=TrailAnalyzer(...)`` to additionally run call-chain
+    analysis: each traced call is fed to the analyzer, findings are
+    attached to the trace under ``trail_findings``, and a CRITICAL
+    finding flags the entry with ``flag_reason="trail:<PATTERN>"``.
     """
     if func is None:
-        return functools.partial(watch, name=name)
+        return functools.partial(watch, name=name, trail=trail)
 
     if not inspect.iscoroutinefunction(func):
         raise TypeError(
@@ -273,7 +322,7 @@ def watch(
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         agent_name = name or os.environ.get("DSCAN_AGENT_NAME") or func.__name__
-        session = _Session(Tracer(agent_name))
+        session = _Session(Tracer(agent_name), trail=trail)
         token = _current_session.set(session)
         _activate_sdk_patch()
         try:

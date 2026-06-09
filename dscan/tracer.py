@@ -90,11 +90,16 @@ class Tracer:
         flagged: bool = False,
         flag_reason: str | None = None,
         ts: str | None = None,
+        trail_findings: list[Any] | None = None,
     ) -> dict[str, Any]:
         """Append one trace entry and return it.
 
         ``params`` and ``result`` are expected to be already redacted by
         the caller. The returned dict is exactly what was written.
+
+        ``trail_findings`` is included only when not ``None``; this keeps
+        the default schema unchanged for callers that don't use the trail
+        engine.
         """
         entry: dict[str, Any] = {
             "ts": ts or _utc_now_iso(),
@@ -107,6 +112,8 @@ class Tracer:
             "flagged": bool(flagged),
             "flag_reason": flag_reason,
         }
+        if trail_findings is not None:
+            entry["trail_findings"] = trail_findings
         await self._append(entry)
         return entry
 
