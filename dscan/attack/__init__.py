@@ -22,6 +22,7 @@ from .models import (
     Severity,
 )
 from .payloads import ALL_PAYLOADS, get_payloads_for_context
+from .report import AttackReporter
 from .runner import AttackRunner, attack_suite
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "DetectionResult",
     "AttackRunner",
     "attack_suite",
+    "AttackReporter",
 ]
