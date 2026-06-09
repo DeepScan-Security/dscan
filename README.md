@@ -1,23 +1,18 @@
 # dscan
 
 [![CI](https://github.com/DeepScan-Security/dscan/actions/workflows/ci.yml/badge.svg)](https://github.com/DeepScan-Security/dscan/actions/workflows/ci.yml)
-![coverage](https://img.shields.io/badge/coverage-97%25-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
 [![PyPI](https://img.shields.io/pypi/v/dscan-security)](https://pypi.org/project/dscan-security/)
 [![Python](https://img.shields.io/pypi/pyversions/dscan-security)](https://pypi.org/project/dscan-security/)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-An open source agent security suite. Trace and redact your agent's tool
-calls, scan its prompts and MCP configs, and detect suspicious call
-chains — then inspect everything in a local dashboard.
+Security suite for AI agents.
 
 ```bash
 pip install dscan-security
 ```
 
-The package installs as `dscan-security`; the import path and CLI stay
-`dscan` (`import dscan`, `dscan --help`).
-
-![dscan dashboard](https://raw.githubusercontent.com/DeepScan-Security/dscan/main/docs/dashboard.png)
+---
 
 ## Quick start
 
@@ -26,111 +21,180 @@ from dscan import watch
 
 @watch
 async def my_agent(task: str):
-    ...  # your agent code, unchanged
+    # your agent code unchanged
+    ...
 ```
 
-Run your agent, then open the dashboard:
 
 ```bash
-dscan dashboard
+dscan dashboard    # localhost:4321 — see every tool call
+dscan scan .       # check before you ship
+dscan audit .      # check your MCP servers
+dscan attack agent.py  # test like an attacker would
 ```
 
-Tool calls are written as redacted NDJSON to `~/.dscan/traces/` (override
-with `DSCAN_TRACES_DIR`). Wrapping any tool with `@watch.tool` traces its
-params and result; if you use the Anthropic SDK, `@watch` also intercepts
-`messages.create()` and traces each `tool_use` block.
+---
 
 ## What dscan catches
 
-| Capability | What it detects |
-| --- | --- |
-| `@watch` (tracing) | Every tool call — name, params, result, duration — written as redacted NDJSON; flags calls whose params contain secrets |
-| Redaction | AWS keys, Anthropic/OpenAI/GitHub/Stripe tokens, JWTs, emails, phone numbers, SSNs, Luhn-valid credit cards, database-URL passwords, high-entropy secrets |
-| `dscan scan` | Permissive prompts, injection-prone prompts, hardcoded secrets, excessive tool scope; unverified, overprivileged, and credential-leaking MCP servers |
-| `dscan trail` | Suspicious tool-call sequences across an agent run (exfiltration, recon, injection relay, data staging, goal drift) |
-| `dscan dashboard` | Local web UI: sessions, per-call timeline, redacted values, secrets flags, and trail findings |
+| Module | What it detects | How |
+|--------|----------------|-----|
+| `dscan watch` | Every MCP tool call — params, results, timing, secrets in params | Runtime decorator |
+| `dscan secrets` | API keys, PII, credentials in traces before they're logged | Regex + entropy |
+| `dscan scan` | Dangerous patterns in system prompts and MCP configs | Static analysis |
+| `dscan shield` | Prompt injection and jailbreak attempts in real time | LlamaFirewall + regex |
+| `dscan trail` | Multi-step attacks invisible at the single-call level | Sequence analysis |
+| `dscan attack` | Vulnerabilities in your live agent — 61 adversarial payloads | Active testing |
+| `dscan audit` | Poisoned, over-privileged, or CVE-affected MCP servers | Supply chain scan |
+
+---
 
 ## Commands
 
-### `dscan scan`
+### dscan watch
 
-Static analysis of system prompts and MCP config files in a directory.
-Exits `1` if any high-severity issue is found.
+```python
+from dscan import watch, TrailAnalyzer, ShieldMiddleware
 
-```text
-$ dscan scan ./prompts
-                                  HIGH (1)
-┏━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┓
-┃ Rule  ┃ File   ┃ Line ┃ Message                     ┃ Snippet           ┃
-┡━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━┩
-│ SP003 │ sp.txt │    2 │ Hardcoded secret in prompt  │ ...sk-ant-api03... │
-└───────┴────────┴──────┴─────────────────────────────┴───────────────────┘
-✗ 1 high-severity finding(s).
+@watch  # minimal — just intercept and log
+async def my_agent(task: str): ...
+
+@watch(trail=TrailAnalyzer(), shield=ShieldMiddleware())
+async def my_agent(task: str): ...  # full protection
 ```
 
-### `dscan watch`
+### dscan scan
 
-`@watch` is a decorator, not a runtime command. This prints a reminder:
-
-```text
-$ dscan watch
-⚠ Add @watch to your agent function. See README for usage.
+```bash
+dscan scan .                          # scan current directory
+dscan scan ./agent.py                 # scan one file
+dscan scan --prompt system_prompt.txt # scan a system prompt
 ```
 
-### `dscan trail`
+Finds: over-broad permissions, injection vectors, hardcoded
+secrets, dangerous MCP config patterns.
+Exit 1 if HIGH findings.
 
-Reads trace files and reports suspicious tool-call chains, grouped by
-severity. Exits `1` on any high or critical finding. Supports
-`--min-severity {low|medium|high|critical}` and `--json`.
+### dscan audit
 
-```text
-$ dscan trail ~/.dscan/traces/
-┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
-┃ Severity ┃ Pattern         ┃ Tools Involved          ┃ Message       ┃ Confidence ┃
-┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
-│ CRITICAL │ INJECTION_RELAY │ search_web → send_email │ untrusted...  │        85% │
-│ HIGH     │ EXFIL_SEQUENCE  │ read_file → send_email  │ read then...  │        80% │
-└──────────┴─────────────────┴─────────────────────────┴───────────────┴────────────┘
-2 findings across 5 tool calls analysed
+```bash
+dscan audit                           # auto-discovers mcp.json
+dscan audit .cursor/mcp.json         # explicit config
+dscan audit . --fail-on critical      # CI mode
+dscan audit . --server filesystem     # one server only
 ```
 
-### `dscan dashboard`
+Checks: tool poisoning, over-privilege, unpinned versions,
+known CVEs (CVE-2025-6514, CVE-2025-53967), shadow tools.
+Exit 1 if findings at or above --fail-on threshold.
 
-Serves the local web UI at `localhost:4321`. `--port` sets the port;
-`--no-open` skips opening a browser.
+### dscan trail
 
-```text
-$ dscan dashboard --no-open
-✓ Dashboard at http://127.0.0.1:4321  (Ctrl-C to stop)
+```bash
+dscan trail ~/.dscan/traces/          # analyse existing traces
+dscan trail traces/ --min-severity high
+dscan trail traces/ --json            # machine-readable output
 ```
 
-## How trail works
+Detects: EXFIL_SEQUENCE, RECON_WALK, INJECTION_RELAY,
+DATA_STAGING, GOAL_DRIFT.
 
-`dscan trail` reads your trace files and looks at the order of tool
-calls, not just each call on its own. It groups calls by agent run and
-reports five kinds of suspicious sequences: reading sensitive data and
-then sending it somewhere external (exfiltration), probing for
-permissions and then running a tool the agent never declared
-(reconnaissance), pulling in untrusted web or email content and then
-immediately sending or executing (injection relay), reading several
-different sensitive sources in a row with nothing sent in between (data
-staging), and taking destructive or outbound actions that a read-only
-goal never asked for (goal drift). Each finding carries a severity and a
-confidence score so you can triage.
+### dscan shield
+
+```bash
+dscan shield --setup                  # download models
+dscan shield check "some input text"  # test a string
+dscan shield check "text" --offline   # regex only, no model
+dscan shield status                   # show configuration
+```
+
+Requires: pip install dscan-security[shield]
+
+### dscan attack
+
+```bash
+dscan attack agent.py                 # auto-discovers tools
+dscan attack --url http://localhost:8080/chat
+dscan attack agent.py --categories prompt_injection,jailbreak
+dscan attack agent.py --max-payloads 10 --ci
+```
+
+**pytest integration:**
+
+```python
+from dscan.attack import attack_suite
+
+def test_agent_security():
+    report = attack_suite(target=my_agent)
+    assert report.critical_count == 0
+    assert report.high_count == 0
+```
+
+Attack categories: prompt_injection, jailbreak, tool_misuse,
+indirect_injection, goal_hijacking, privilege_escalation.
+Exit 1 if findings at or above --fail-on (default: high).
+
+### dscan dashboard
+
+```bash
+dscan dashboard                       # opens localhost:4321
+dscan dashboard --port 4322           # custom port
+dscan dashboard --no-open             # don't open browser
+```
+
+Three tabs: Traces (live tool calls), Attack Reports,
+Audit Reports.
+
+---
+
+## CI/CD integration
+
+```yaml
+# .github/workflows/security.yml
+- name: Install dscan
+  run: pip install dscan-security
+
+- name: Audit MCP servers
+  run: dscan audit . --fail-on high --ci
+
+- name: Attack test agent
+  run: |
+    python agent.py &
+    sleep 2
+    dscan attack --url http://localhost:8080 \
+      --categories prompt_injection,jailbreak \
+      --fail-on high \
+      --ci
+```
+
+---
+
+## How it works
+
+dscan intercepts MCP tool calls at the decorator layer,
+analyses them for security patterns, and stores traces
+locally at ~/.dscan/. Nothing leaves your machine unless
+you opt in to cloud traces (Team tier).
+
+---
+
+## Installation
+
+```bash
+pip install dscan-security           # core (all 7 modules)
+pip install dscan-security[shield]   # + LlamaFirewall models
+```
+
+Requires Python 3.11+.
+
+---
 
 ## Contributing
 
-```bash
-git clone https://github.com/DeepScan-Security/dscan
-cd dscan
-pip install -e ".[dev]"
-pytest
-```
+See CONTRIBUTING.md. Run tests: pytest tests/ -v
 
-Built test-first; coverage stays at or above 80%. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for what we need help with, and
-[SECURITY.md](SECURITY.md) to report a vulnerability.
+---
 
 ## License
 
-MIT
+MIT — built by DeepScan (deepscan.security)
