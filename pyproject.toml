@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dscan-security"
-version = "0.1.1"
+version = "0.2.0"
 description = "Open source agent security suite — intercept, scan, and test your AI agents"
 readme = "README.md"
 license = { text = "MIT" }

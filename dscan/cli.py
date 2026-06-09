@@ -10,7 +10,10 @@ resolves to :func:`main`.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -20,6 +23,9 @@ from rich.console import Console
 from rich.table import Table
 
 from dscan import __version__
+from dscan.attack import AttackCategory, AttackReporter, AttackRunner, HttpTarget
+from dscan.attack.discovery import DiscoveryError, ToolDiscovery
+from dscan.attack.models import AgentContext
 from dscan.shield import ModelNotReadyError, ShieldMiddleware
 from dscan.trail import TrailAnalyzer
 
@@ -357,6 +363,210 @@ def _render_findings(findings: list) -> None:
         _err(f"{high} high-severity finding(s).")
     else:
         _warn(f"{len(findings)} finding(s), none high severity.")
+
+
+_ATTACK_SEV_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+_attack_agent_cache: dict = {}
+
+
+def _attack_dir() -> Path:
+    env = os.environ.get("DSCAN_ATTACK_DIR")
+    return Path(env) if env else Path.home() / ".dscan" / "attack"
+
+
+def _parse_attack_categories(raw: str | None) -> list | None:
+    if not raw:
+        return None
+    cats = []
+    for part in raw.split(","):
+        name = part.strip()
+        if not name:
+            continue
+        try:
+            cats.append(AttackCategory(name))
+        except ValueError as exc:
+            raise ValueError(
+                f"Unknown category: {name}. Options: "
+                + ", ".join(c.value for c in AttackCategory)
+            ) from exc
+    return cats or None
+
+
+def _parse_headers(header_opts) -> dict:
+    headers = {}
+    for h in header_opts:
+        if ":" in h:
+            key, _, value = h.partition(":")
+            headers[key.strip()] = value.strip()
+    return headers
+
+
+def _attack_should_fail(report, fail_on: str) -> bool:
+    threshold = _ATTACK_SEV_RANK[fail_on]
+    return any(
+        f.succeeded and _ATTACK_SEV_RANK.get(f.payload.severity.value, 0) >= threshold
+        for f in report.findings
+    )
+
+
+def _attack_report_path(target_name: str, report) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(target_name).name or "agent")
+    ts = re.sub(r"[^0-9T]", "", (report.timestamp or "")[:19]) or "report"
+    return _attack_dir() / f"{ts}_{safe}.json"
+
+
+def _pick_agent(module):
+    import inspect
+
+    for name in ("agent", "run", "main", "run_agent", "handle", "chat", "respond", "run_demo"):
+        fn = getattr(module, name, None)
+        if callable(fn):
+            return fn
+    for name in dir(module):
+        fn = getattr(module, name, None)
+        if inspect.iscoroutinefunction(fn):
+            try:
+                params = inspect.signature(fn).parameters.values()
+            except (ValueError, TypeError):
+                continue
+            if any(p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in params):
+                return fn
+    return None
+
+
+def _resolve_callable(target: str):
+    if target in _attack_agent_cache:
+        return _attack_agent_cache[target]
+    import importlib
+    import importlib.util
+
+    fn = None
+    try:
+        path = Path(target)
+        if path.suffix == ".py" and path.exists():
+            spec = importlib.util.spec_from_file_location("dscan_attack_target", str(path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        else:
+            module = importlib.import_module(target)
+        fn = _pick_agent(module)
+    except Exception:  # noqa: BLE001 — best-effort; fall back to a stub agent
+        fn = None
+    _attack_agent_cache[target] = fn
+    return fn
+
+
+def _load_agent(target: str):
+    """Return an async agent_fn that lazily imports and calls the target."""
+    import inspect
+
+    async def agent_fn(task: str) -> str:
+        fn = _resolve_callable(target)
+        if fn is None:
+            return ""
+        result = fn(task)
+        if inspect.isawaitable(result):
+            result = await result
+        return str(result)
+
+    return agent_fn
+
+
+@main.command()
+@click.argument("target", required=False)
+@click.option("--url", default=None, help="HTTP endpoint URL (overrides target).")
+@click.option("--input-field", default="message", show_default=True, help="Request body field for input.")
+@click.option("--output-field", default="response", show_default=True, help="Response field to extract.")
+@click.option("--header", "header_opts", multiple=True, help="HTTP header KEY:VALUE (repeatable).")
+@click.option("--categories", default=None, help="Comma-separated attack categories.")
+@click.option("--max-payloads", type=int, default=None, help="Maximum payloads to run.")
+@click.option("--concurrency", type=int, default=3, show_default=True, help="Parallel execution limit.")
+@click.option(
+    "--fail-on",
+    type=click.Choice(["critical", "high", "medium", "low"]),
+    default="high",
+    show_default=True,
+    help="Exit 1 if findings at this severity or above.",
+)
+@click.option("--ci", is_flag=True, default=False, help="CI mode: JSON output, no rich UI.")
+@click.option("--output", "output_path", type=click.Path(), default=None, help="Save JSON report to this file.")
+@click.option("--baseline", default=None, help="Comma-separated benign baseline inputs.")
+def attack(
+    target, url, input_field, output_field, header_opts, categories,
+    max_payloads, concurrency, fail_on, ci, output_path, baseline,
+):
+    """Actively attack an agent with adversarial payloads.
+
+    TARGET is a Python file, MCP config, or module path. Use --url for an
+    HTTP endpoint.
+    """
+    try:
+        cats = _parse_attack_categories(categories)
+    except ValueError as exc:
+        _err(str(exc))
+        sys.exit(2)
+    baseline_inputs = [b.strip() for b in baseline.split(",") if b.strip()] if baseline else None
+
+    if url:
+        http_target = HttpTarget(
+            url=url, input_field=input_field, output_field=output_field,
+            headers=_parse_headers(header_opts),
+        )
+        if not asyncio.run(http_target.probe()):
+            _err(f"Cannot connect to agent at {url}. Is the agent running?")
+            sys.exit(2)
+        context = AgentContext(framework="http", source_file=url)
+        agent_fn = http_target.send
+        target_name = url
+    else:
+        if not target:
+            _err("Provide a target (file, MCP config, or module), or use --url.")
+            sys.exit(2)
+        try:
+            context = ToolDiscovery.auto(target)
+        except DiscoveryError as exc:
+            _err(str(exc))
+            sys.exit(2)
+        agent_fn = _load_agent(target)
+        target_name = target
+
+    if not ci:
+        console.print(f"[bold]dscan attack[/bold]  {target_name}")
+        console.print(
+            f"[dim]Discovered {len(context.tool_names)} tool(s) via "
+            f"{context.framework or 'unknown'}[/dim]\n"
+        )
+
+    runner = AttackRunner(context=context, concurrency=concurrency, baseline_inputs=baseline_inputs)
+
+    if ci:
+        report = asyncio.run(runner.run(agent_fn=agent_fn, categories=cats, max_payloads=max_payloads))
+    else:
+        def on_progress(current, total, finding):
+            mark = "[red]✗ Found[/red]" if finding.succeeded else "[green]✓ Clean[/green]"
+            console.print(f"  [{finding.payload.id}] {finding.payload.name} ({current}/{total}) {mark}")
+
+        report = asyncio.run(
+            runner.run(agent_fn=agent_fn, categories=cats, max_payloads=max_payloads, on_progress=on_progress)
+        )
+
+    reporter = AttackReporter(report, console=console)
+    if ci:
+        console.print_json(data=reporter.to_dict())
+    else:
+        console.print()
+        reporter.print_full_report()
+
+    if output_path:
+        reporter.save_json(output_path)
+    elif not ci:
+        try:
+            reporter.save_json(_attack_report_path(target_name, report))
+        except OSError:  # pragma: no cover - defensive
+            pass
+
+    if _attack_should_fail(report, fail_on):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -151,6 +151,51 @@ async def _session(request: web.Request) -> web.Response:
     return web.json_response({"error": "session not found"}, status=404)
 
 
+def _resolve_attack_dir() -> Path:
+    env = os.environ.get("DSCAN_ATTACK_DIR")
+    return Path(env) if env else Path.home() / ".dscan" / "attack"
+
+
+async def _attack_reports(request: web.Request) -> web.Response:
+    """List attack-report summaries, newest first."""
+    directory = _resolve_attack_dir()
+    summaries: list[dict[str, Any]] = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, ValueError, OSError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            summary = data.get("summary") or {}
+            summaries.append({
+                "filename": path.name,
+                "target": data.get("target", ""),
+                "timestamp": summary.get("timestamp", ""),
+                "passed": summary.get("passed", True),
+                "critical_count": summary.get("critical_count", 0),
+                "high_count": summary.get("high_count", 0),
+            })
+    summaries.sort(key=lambda s: str(s.get("timestamp") or ""), reverse=True)
+    return web.json_response(summaries)
+
+
+async def _attack_report(request: web.Request) -> web.Response:
+    """Return one full attack report by filename."""
+    filename = request.match_info["filename"]
+    if "/" in filename or ".." in filename:
+        return web.json_response({"error": "invalid filename"}, status=400)
+    path = _resolve_attack_dir() / filename
+    if not path.is_file():
+        return web.json_response({"error": "report not found"}, status=404)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError, OSError):
+        return web.json_response({"error": "invalid report"}, status=400)
+    return web.json_response(data)
+
+
 def make_app(traces_dir: str | os.PathLike[str] | None = None) -> web.Application:
     """Build the dashboard aiohttp application."""
     app = web.Application()
@@ -160,6 +205,8 @@ def make_app(traces_dir: str | os.PathLike[str] | None = None) -> web.Applicatio
             web.get("/", _index),
             web.get("/api/traces", _traces),
             web.get("/api/traces/{session_id}", _session),
+            web.get("/api/attack-reports", _attack_reports),
+            web.get("/api/attack-reports/{filename}", _attack_report),
         ]
     )
     return app

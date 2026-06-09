@@ -301,3 +301,66 @@ class TestTrailFindings:
         stats = compute_stats(traces)
         assert stats["flagged"] == 3  # all flagged calls
         assert stats["critical"] == 1  # only the CRITICAL trail finding
+
+
+# --------------------------------------------------------------------------
+# Attack reports
+# --------------------------------------------------------------------------
+def _attack_report(target, timestamp, passed, critical, high, findings=None):
+    return {
+        "target": target,
+        "summary": {
+            "timestamp": timestamp,
+            "passed": passed,
+            "critical_count": critical,
+            "high_count": high,
+        },
+        "findings": findings or [],
+    }
+
+
+class TestAttackReports:
+    async def test_empty_when_dir_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DSCAN_ATTACK_DIR", str(tmp_path / "nope"))
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/attack-reports")).json()
+        assert data == []
+
+    async def test_lists_summaries_sorted(self, tmp_path, monkeypatch):
+        adir = tmp_path / "attack"
+        adir.mkdir()
+        (adir / "r1.json").write_text(
+            json.dumps(_attack_report("a.py", "2026-06-09T01:00:00Z", False, 1, 2))
+        )
+        (adir / "r2.json").write_text(
+            json.dumps(_attack_report("b.py", "2026-06-09T02:00:00Z", True, 0, 0))
+        )
+        monkeypatch.setenv("DSCAN_ATTACK_DIR", str(adir))
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/attack-reports")).json()
+        assert len(data) == 2
+        assert data[0]["timestamp"] == "2026-06-09T02:00:00Z"  # newest first
+        assert set(data[0]) >= {
+            "filename", "target", "timestamp", "passed", "critical_count", "high_count",
+        }
+        first = next(d for d in data if d["filename"] == "r1.json")
+        assert first["target"] == "a.py"
+        assert first["passed"] is False
+        assert first["critical_count"] == 1
+        assert first["high_count"] == 2
+
+    async def test_full_report(self, tmp_path, monkeypatch):
+        adir = tmp_path / "attack"
+        adir.mkdir()
+        full = _attack_report("a.py", "t", False, 1, 0, findings=[{"id": "PI-001"}])
+        (adir / "r1.json").write_text(json.dumps(full))
+        monkeypatch.setenv("DSCAN_ATTACK_DIR", str(adir))
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/attack-reports/r1.json")).json()
+        assert data == full
+
+    async def test_full_report_not_found(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DSCAN_ATTACK_DIR", str(tmp_path))
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            resp = await client.get("/api/attack-reports/missing.json")
+        assert resp.status == 404
