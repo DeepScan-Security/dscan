@@ -63,9 +63,11 @@ class TestScanCommand:
 
 class TestTopLevel:
     def test_version(self):
+        from dscan import __version__
+
         result = CliRunner().invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert __version__ in result.output
 
     def test_help_lists_commands(self):
         result = CliRunner().invoke(main, ["--help"])

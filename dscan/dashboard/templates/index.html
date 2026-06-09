@@ -90,6 +90,17 @@
     table.attack-table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
     .attack-table th, .attack-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; }
     .attack-table th { color: #6b7280; font-weight: 600; }
+    /* Audit tab */
+    .audit-view { grid-column: 1 / 3; overflow-y: auto; padding: 26px 30px; background: #fff; display: none; }
+    .app.audit .sidebar, .app.audit .content, .app.audit .attack-view { display: none; }
+    .app.audit .audit-view { display: block; }
+    .risk-badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 700; text-transform: uppercase; }
+    .risk-critical { background: rgba(220, 38, 38, .15); color: #DC2626; }
+    .risk-high { background: rgba(186, 117, 23, .15); color: #BA7517; }
+    .risk-medium { background: rgba(183, 119, 13, .15); color: #B7770D; }
+    .risk-low { background: rgba(16, 185, 129, .15); color: #10b981; }
+    .audit-srv { cursor: pointer; }
+    .audit-srv:hover { background: rgba(0, 0, 0, .02); }
   </style>
 </head>
 <body>
@@ -99,6 +110,7 @@
       <div class="tabs">
         <button class="tab active" id="tab-traces">Traces</button>
         <button class="tab" id="tab-attack">Attack Reports</button>
+        <button class="tab" id="tab-audit">Audit</button>
       </div>
       <div class="stat" style="margin-left: auto"><span class="n" id="s-calls">0</span><span class="l">calls today</span></div>
       <div class="stat"><span class="n" id="s-flagged">0</span><span class="l">flagged</span></div>
@@ -112,6 +124,11 @@
       <h2>Attack Reports</h2>
       <div id="attack-list"></div>
       <div id="attack-detail"></div>
+    </div>
+    <div class="audit-view" id="audit-view">
+      <h2>Audit Reports</h2>
+      <div id="audit-list"></div>
+      <div id="audit-detail"></div>
     </div>
   </div>
 
@@ -288,12 +305,118 @@
     const ATTACK_SEV = { critical: "#DC2626", high: "#BA7517", medium: "#B7770D", low: "#6b7280" };
     let attackReports = [];
 
+    let auditReports = [];
+
     function switchTab(tab) {
       const app = document.querySelector(".app");
-      document.getElementById("tab-traces").classList.toggle("active", tab === "traces");
-      document.getElementById("tab-attack").classList.toggle("active", tab === "attack");
-      if (tab === "attack") { app.classList.add("attack"); loadAttackReports(); }
-      else { app.classList.remove("attack"); }
+      for (const t of ["traces", "attack", "audit"]) {
+        document.getElementById("tab-" + t).classList.toggle("active", tab === t);
+      }
+      app.classList.toggle("attack", tab === "attack");
+      app.classList.toggle("audit", tab === "audit");
+      if (tab === "attack") loadAttackReports();
+      if (tab === "audit") loadAuditReports();
+    }
+
+    const AUDIT_BORDER = { critical: "#DC2626", high: "#BA7517", medium: "#B7770D", low: "#10b981" };
+
+    async function loadAuditReports() {
+      try {
+        const r = await fetch("/api/audit-reports");
+        auditReports = r.ok ? await r.json() : [];
+      } catch (e) { auditReports = []; }
+      renderAuditList();
+    }
+
+    function renderAuditList() {
+      const list = document.getElementById("audit-list");
+      const detail = document.getElementById("audit-detail");
+      if (!auditReports.length) {
+        list.innerHTML = '<div class="empty">No audit reports yet. Run: dscan audit</div>';
+        detail.innerHTML = "";
+        return;
+      }
+      list.innerHTML = "";
+      for (const rep of auditReports) {
+        const el = document.createElement("div");
+        el.className = "report-card";
+        const badge = rep.passed
+          ? '<span class="badge pass">PASSED</span>'
+          : '<span class="badge fail">FAILED</span>';
+        el.innerHTML =
+          '<div class="rc-head"><span class="rc-target">' + esc(rep.filename) + "</span>" +
+          badge +
+          '<span style="margin-left:auto;color:#6b7280;font-size:12px">' + esc(fmtTime(rep.timestamp)) + "</span></div>" +
+          '<div class="rc-meta">' + (rep.server_count || 0) + " servers &middot; " +
+          (rep.critical_count || 0) + " critical &middot; " + (rep.high_count || 0) + " high</div>";
+        el.onclick = () => openAuditReport(rep.filename);
+        list.appendChild(el);
+      }
+    }
+
+    async function openAuditReport(filename) {
+      const detail = document.getElementById("audit-detail");
+      try {
+        const r = await fetch("/api/audit-reports/" + encodeURIComponent(filename));
+        if (!r.ok) { detail.innerHTML = '<div class="empty">Could not load report</div>'; return; }
+        renderAuditDetail(await r.json());
+      } catch (e) { detail.innerHTML = '<div class="empty">Could not load report</div>'; }
+    }
+
+    function renderAuditDetail(data) {
+      const detail = document.getElementById("audit-detail");
+      const servers = data.servers || [];
+      const order = { critical: 0, high: 1, medium: 2, low: 3 };
+      const sorted = servers
+        .map((s, i) => ({ s, i }))
+        .sort((a, b) => (order[a.s.risk_level] ?? 9) - (order[b.s.risk_level] ?? 9));
+      let html =
+        '<h3 style="margin-top:20px">' + esc((data.source_files || []).join(", ") || "audit") + "</h3>" +
+        '<table class="attack-table"><thead><tr><th>Server</th><th>Risk</th><th>Score</th>' +
+        "<th>Findings</th><th>Status</th></tr></thead><tbody>";
+      for (const { s, i } of sorted) {
+        const lvl = s.risk_level || "low";
+        const status = (lvl === "critical" || lvl === "high")
+          ? '<span style="color:#DC2626">FAIL</span>'
+          : '<span style="color:#10b981">OK</span>';
+        html +=
+          '<tr class="audit-srv" data-i="' + i + '"><td>' + esc(s.name) + "</td>" +
+          '<td><span class="risk-badge risk-' + esc(lvl) + '">' + esc(lvl.toUpperCase()) + "</span></td>" +
+          "<td>" + (s.risk_score || 0) + "</td>" +
+          "<td>" + (s.findings || []).length + "</td>" +
+          "<td>" + status + "</td></tr>";
+      }
+      html += "</tbody></table><div id=\"audit-findings\"></div>";
+      detail.innerHTML = html;
+      detail.querySelectorAll(".audit-srv").forEach((row) => {
+        row.onclick = () => renderAuditFindings(servers[parseInt(row.dataset.i, 10)]);
+      });
+    }
+
+    function renderAuditFindings(server) {
+      const box = document.getElementById("audit-findings");
+      const findings = server.findings || [];
+      if (!findings.length) {
+        box.innerHTML = '<div style="color:#6b7280;margin-top:14px">No findings for ' + esc(server.name) + "</div>";
+        return;
+      }
+      const order = { critical: 0, high: 1, medium: 2, low: 3 };
+      const sorted = findings.slice().sort(
+        (a, b) => (order[a.risk_level] ?? 9) - (order[b.risk_level] ?? 9)
+      );
+      box.innerHTML =
+        '<h4 style="margin:18px 0 8px">' + esc(server.name) + " findings</h4>" +
+        sorted.map((f) => {
+          const lvl = f.risk_level || "low";
+          const cve = f.cve_id ? ' <span style="color:#DC2626">' + esc(f.cve_id) + "</span>" : "";
+          return '<div style="border-left:3px solid ' + (AUDIT_BORDER[lvl] || "#6b7280") +
+            ';padding:8px 12px;margin-bottom:8px;background:rgba(0,0,0,.015)">' +
+            '<div style="font-weight:700">' +
+            '<span class="risk-badge risk-' + esc(lvl) + '">' + esc(f.check_id || "") + "</span> " +
+            esc(f.title || "") + cve + "</div>" +
+            '<div style="color:#6b7280;font-size:12px;margin-top:4px">' + esc(f.detail || "") + "</div>" +
+            '<div style="color:#374151;font-size:12px;margin-top:4px">Fix: ' + esc(f.recommendation || "") + "</div></div>";
+        }).join("");
     }
 
     async function loadAttackReports() {
@@ -366,6 +489,7 @@
 
     document.getElementById("tab-traces").onclick = () => switchTab("traces");
     document.getElementById("tab-attack").onclick = () => switchTab("attack");
+    document.getElementById("tab-audit").onclick = () => switchTab("audit");
 
     render();
     setInterval(refresh, 5000);

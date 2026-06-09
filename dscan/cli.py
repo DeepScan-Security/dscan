@@ -20,12 +20,14 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from dscan import __version__
 from dscan.attack import AttackCategory, AttackReporter, AttackRunner, HttpTarget
 from dscan.attack.discovery import DiscoveryError, ToolDiscovery
 from dscan.attack.models import AgentContext
+from dscan.audit import AuditScanner
 from dscan.shield import ModelNotReadyError, ShieldMiddleware
 from dscan.trail import TrailAnalyzer
 
@@ -566,6 +568,159 @@ def attack(
             pass
 
     if _attack_should_fail(report, fail_on):
+        sys.exit(1)
+
+
+_AUDIT_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+_AUDIT_COLORS = {"critical": "red", "high": "#f59e0b", "medium": "yellow", "low": "green"}
+
+
+def _audit_reports_dir() -> Path:
+    env = os.environ.get("DSCAN_AUDIT_REPORTS_DIR")
+    return Path(env) if env else Path.home() / ".dscan" / "audit"
+
+
+def _audit_finding_to_dict(f) -> dict:
+    return {
+        "check_id": f.check_id.value,
+        "risk_level": f.risk_level.value,
+        "title": f.title,
+        "detail": f.detail,
+        "recommendation": f.recommendation,
+        "score_contribution": f.score_contribution,
+        "cve_id": f.cve_id,
+    }
+
+
+def _audit_report_to_dict(report) -> dict:
+    return {
+        "passed": report.passed,
+        "timestamp": report.timestamp,
+        "source_files": report.source_files,
+        "servers": [
+            {
+                "name": s.server.name,
+                "risk_level": s.risk_level.value,
+                "risk_score": s.risk_score,
+                "passed": s.passed,
+                "findings": [_audit_finding_to_dict(f) for f in s.findings],
+            }
+            for s in report.servers
+        ],
+    }
+
+
+def _audit_should_fail(report, fail_on: str) -> bool:
+    threshold = _AUDIT_RANK[fail_on]
+    return any(_AUDIT_RANK.get(s.risk_level.value, 0) >= threshold for s in report.servers)
+
+
+def _audit_report_name(target_name: str, report) -> str:
+    base = Path(target_name).stem or Path(target_name).name or "config"
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)
+    ts = re.sub(r"[^0-9T]", "", (report.timestamp or "")[:19]) or "report"
+    return f"{ts}_{safe}.json"
+
+
+def _render_audit(report) -> None:
+    table = Table(header_style="bold")
+    table.add_column("Server")
+    table.add_column("Risk")
+    table.add_column("Score", justify="right")
+    table.add_column("Findings", justify="right")
+    table.add_column("Status")
+    for s in report.servers:
+        color = _AUDIT_COLORS.get(s.risk_level.value, "")
+        status = "[green]✓ PASS[/green]" if s.passed else "[red]✗ FAIL[/red]"
+        table.add_row(
+            s.server.name,
+            f"[{color}]{s.risk_level.value.upper()}[/{color}]",
+            str(s.risk_score),
+            str(len(s.findings)),
+            status,
+        )
+    console.print(table)
+
+    for s in report.servers:
+        if s.risk_level.value in ("high", "critical"):
+            console.print(f"\n[bold]{s.server.name}[/bold]")
+            for f in s.findings:
+                color = _AUDIT_COLORS.get(f.risk_level.value, "")
+                console.print(
+                    f"  [{color}][{f.check_id.value}] {f.risk_level.value.upper()}[/] — {f.title}"
+                )
+                console.print(f"    [dim]{f.detail}[/dim]")
+                console.print(f"    [dim]Fix: {f.recommendation}[/dim]")
+
+    status = "✓ PASSED" if report.passed else "✗ FAILED"
+    color = "green" if report.passed else "red"
+    console.print()
+    console.print(
+        Panel(
+            f"[bold {color}]{status}[/]  {len(report.servers)} servers  •  "
+            f"{report.total_findings} findings",
+            title="[bold]dscan audit[/]",
+            border_style=color,
+        )
+    )
+
+
+@main.command()
+@click.argument("target", required=False)
+@click.option("--server", "server_filter", multiple=True, help="Audit only this server (repeatable).")
+@click.option(
+    "--fail-on",
+    type=click.Choice(["critical", "high", "medium", "low"]),
+    default="high",
+    show_default=True,
+    help="Exit 1 if a server is at this risk level or above.",
+)
+@click.option("--ci", is_flag=True, default=False, help="JSON output, no rich UI.")
+@click.option("--output", "output_path", type=click.Path(), default=None, help="Save JSON report to this file.")
+@click.option("--no-baseline", is_flag=True, default=False, help="Skip baseline comparison.")
+def audit(target, server_filter, fail_on, ci, output_path, no_baseline):
+    """Audit MCP server configs for supply-chain risk.
+
+    TARGET is an MCP config file or a directory to search. Defaults to the
+    current directory.
+    """
+    target = target or "."
+    scanner = AuditScanner()
+    path = Path(target)
+    try:
+        if path.is_dir():
+            report = scanner.audit_directory(str(path))
+            if report is None:
+                _err(
+                    f"No MCP config found in {target}. "
+                    "Expected: .cursor/mcp.json or mcp.json"
+                )
+                sys.exit(2)
+        else:
+            report = scanner.audit_config(str(path), save_baseline=not no_baseline)
+    except FileNotFoundError:
+        _err(f"Config not found: {target}")
+        sys.exit(2)
+
+    if server_filter:
+        report.servers = [s for s in report.servers if s.server.name in server_filter]
+
+    if ci:
+        console.print_json(data=_audit_report_to_dict(report))
+    else:
+        _render_audit(report)
+
+    payload = json.dumps(_audit_report_to_dict(report), indent=2)
+    if output_path:
+        Path(output_path).write_text(payload, encoding="utf-8")
+    try:
+        reports_dir = _audit_reports_dir()
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / _audit_report_name(target, report)).write_text(payload, encoding="utf-8")
+    except OSError:  # pragma: no cover - defensive
+        pass
+
+    if _audit_should_fail(report, fail_on):
         sys.exit(1)
 
 

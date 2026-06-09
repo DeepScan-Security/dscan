@@ -364,3 +364,55 @@ class TestAttackReports:
         async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
             resp = await client.get("/api/attack-reports/missing.json")
         assert resp.status == 404
+
+
+# --------------------------------------------------------------------------
+# Audit reports
+# --------------------------------------------------------------------------
+def _audit_report_json(passed, timestamp, servers):
+    return {
+        "passed": passed,
+        "timestamp": timestamp,
+        "source_files": ["mcp.json"],
+        "servers": servers,
+    }
+
+
+class TestAuditReports:
+    async def test_empty_when_dir_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DSCAN_AUDIT_REPORTS_DIR", str(tmp_path / "nope"))
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/audit-reports")).json()
+        assert data == []
+
+    async def test_lists_summaries(self, tmp_path, monkeypatch):
+        adir = tmp_path / "audit"
+        adir.mkdir()
+        (adir / "r1.json").write_text(json.dumps(_audit_report_json(
+            False, "2026-06-09T01:00:00Z",
+            [{"name": "fs", "risk_level": "critical"}, {"name": "x", "risk_level": "high"}],
+        )))
+        (adir / "r2.json").write_text(json.dumps(_audit_report_json(
+            True, "2026-06-09T02:00:00Z", [{"name": "y", "risk_level": "low"}],
+        )))
+        monkeypatch.setenv("DSCAN_AUDIT_REPORTS_DIR", str(adir))
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/audit-reports")).json()
+        assert len(data) == 2
+        assert data[0]["timestamp"] == "2026-06-09T02:00:00Z"  # newest first
+        r1 = next(d for d in data if d["filename"] == "r1.json")
+        assert set(r1) >= {"filename", "passed", "timestamp", "server_count", "critical_count", "high_count"}
+        assert r1["server_count"] == 2
+        assert r1["critical_count"] == 1
+        assert r1["high_count"] == 1
+        assert r1["passed"] is False
+
+    async def test_full_report(self, tmp_path, monkeypatch):
+        adir = tmp_path / "audit"
+        adir.mkdir()
+        full = _audit_report_json(False, "t", [{"name": "fs", "risk_level": "critical", "findings": [{"check_id": "AU006"}]}])
+        (adir / "r1.json").write_text(json.dumps(full))
+        monkeypatch.setenv("DSCAN_AUDIT_REPORTS_DIR", str(adir))
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/audit-reports/r1.json")).json()
+        assert data == full

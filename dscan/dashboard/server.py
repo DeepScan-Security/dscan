@@ -196,6 +196,55 @@ async def _attack_report(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
+def _resolve_audit_dir() -> Path:
+    env = os.environ.get("DSCAN_AUDIT_REPORTS_DIR")
+    return Path(env) if env else Path.home() / ".dscan" / "audit"
+
+
+async def _audit_reports(request: web.Request) -> web.Response:
+    """List audit-report summaries, newest first."""
+    directory = _resolve_audit_dir()
+    summaries: list[dict[str, Any]] = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, ValueError, OSError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            servers = data.get("servers") or []
+            summaries.append({
+                "filename": path.name,
+                "passed": data.get("passed", True),
+                "timestamp": data.get("timestamp", ""),
+                "server_count": len(servers),
+                "critical_count": sum(
+                    1 for s in servers if isinstance(s, dict) and s.get("risk_level") == "critical"
+                ),
+                "high_count": sum(
+                    1 for s in servers if isinstance(s, dict) and s.get("risk_level") == "high"
+                ),
+            })
+    summaries.sort(key=lambda s: str(s.get("timestamp") or ""), reverse=True)
+    return web.json_response(summaries)
+
+
+async def _audit_report(request: web.Request) -> web.Response:
+    """Return one full audit report by filename."""
+    filename = request.match_info["filename"]
+    if "/" in filename or ".." in filename:
+        return web.json_response({"error": "invalid filename"}, status=400)
+    path = _resolve_audit_dir() / filename
+    if not path.is_file():
+        return web.json_response({"error": "report not found"}, status=404)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError, OSError):
+        return web.json_response({"error": "invalid report"}, status=400)
+    return web.json_response(data)
+
+
 def make_app(traces_dir: str | os.PathLike[str] | None = None) -> web.Application:
     """Build the dashboard aiohttp application."""
     app = web.Application()
@@ -207,6 +256,8 @@ def make_app(traces_dir: str | os.PathLike[str] | None = None) -> web.Applicatio
             web.get("/api/traces/{session_id}", _session),
             web.get("/api/attack-reports", _attack_reports),
             web.get("/api/attack-reports/{filename}", _attack_report),
+            web.get("/api/audit-reports", _audit_reports),
+            web.get("/api/audit-reports/{filename}", _audit_report),
         ]
     )
     return app
