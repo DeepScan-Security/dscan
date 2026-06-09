@@ -41,6 +41,17 @@ def write_ndjson(path, entries):
     return path
 
 
+def trail_finding(pattern="INJECTION_RELAY", severity="critical", confidence=0.85):
+    return {
+        "pattern": pattern,
+        "severity": severity,
+        "calls_involved": ["search_web", "send_email"],
+        "call_indices": [0, 1],
+        "message": "untrusted read relayed to send",
+        "confidence": confidence,
+    }
+
+
 # --------------------------------------------------------------------------
 # read_traces
 # --------------------------------------------------------------------------
@@ -185,3 +196,76 @@ class TestEndpoints:
             assert 'src="http' not in body
             assert 'href="http' not in body
             assert "cdn" not in body.lower()
+
+
+# --------------------------------------------------------------------------
+# Trail findings
+# --------------------------------------------------------------------------
+class TestTrailFindings:
+    async def test_api_traces_includes_trail_findings(self, tmp_path):
+        findings = [trail_finding(severity="critical")]
+        write_ndjson(
+            tmp_path / f"{_today()}_a.ndjson",
+            [entry(tool="send_email", trail_findings=findings)],
+        )
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/traces")).json()
+        assert data[0]["trail_findings"] == findings
+
+    async def test_critical_trail_finding_is_flagged(self, tmp_path):
+        write_ndjson(
+            tmp_path / f"{_today()}_a.ndjson",
+            [
+                entry(
+                    tool="send_email",
+                    flagged=True,
+                    flag_reason="trail:INJECTION_RELAY",
+                    trail_findings=[trail_finding(severity="critical")],
+                )
+            ],
+        )
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/traces")).json()
+        assert data[0]["flagged"] is True
+        assert data[0]["trail_findings"][0]["severity"] == "critical"
+
+    async def test_session_detail_includes_trail_findings(self, tmp_path):
+        findings = [trail_finding(severity="critical")]
+        write_ndjson(
+            tmp_path / f"{_today()}_a.ndjson",
+            [
+                entry(session_id="abc", tool="search_web", ts=f"{_today()}T01:00:00Z"),
+                entry(
+                    session_id="abc",
+                    tool="send_email",
+                    ts=f"{_today()}T02:00:00Z",
+                    trail_findings=findings,
+                ),
+            ],
+        )
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/traces/abc")).json()
+        send = next(c for c in data["calls"] if c["tool"] == "send_email")
+        assert send["trail_findings"] == findings
+
+    def test_compute_stats_counts_critical_separately_from_secrets(self):
+        traces = [
+            # Secrets-flagged, but NOT a trail finding.
+            entry(flagged=True, flag_reason="secrets_in_params"),
+            # Critical trail finding (also flagged).
+            entry(
+                flagged=True,
+                flag_reason="trail:INJECTION_RELAY",
+                trail_findings=[trail_finding(severity="critical")],
+            ),
+            # A non-critical trail finding must not count toward critical.
+            entry(
+                flagged=True,
+                flag_reason="trail:EXFIL_SEQUENCE",
+                trail_findings=[trail_finding(pattern="EXFIL_SEQUENCE", severity="high")],
+            ),
+            entry(flagged=False),  # clean
+        ]
+        stats = compute_stats(traces)
+        assert stats["flagged"] == 3  # all flagged calls
+        assert stats["critical"] == 1  # only the CRITICAL trail finding

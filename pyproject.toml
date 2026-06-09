@@ -3,46 +3,72 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dscan"
+name = "dscan-security"
 version = "0.1.0"
-description = "An open source agent security suite"
+description = "Open source agent security suite — intercept, scan, and test your AI agents"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-authors = [{ name = "DeepScan Security" }]
-keywords = ["agent", "security", "llm", "observability", "redaction"]
+authors = [
+  { name = "DeepScan", email = "security@deepscan.security" },
+]
+keywords = [
+  "security",
+  "ai-agents",
+  "mcp",
+  "llm-security",
+  "prompt-injection",
+  "devsecops",
+  "agent-security",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Security",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "click",
-    "rich",
-    "aiohttp",
-    "aiofiles",
-    "anthropic",
-    "jinja2",
+  "click>=8.0",
+  "rich>=13.0",
+  "aiohttp>=3.9",
+  "aiofiles>=23.0",
+  "anthropic>=0.25",
+  "jinja2>=3.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pytest-asyncio",
-    "pytest-cov",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=4.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/DeepScan-Security/dscan"
+Homepage = "https://deepscan.security"
 Repository = "https://github.com/DeepScan-Security/dscan"
+"Bug Tracker" = "https://github.com/DeepScan-Security/dscan/issues"
+Changelog = "https://github.com/DeepScan-Security/dscan/blob/main/CHANGELOG.md"
 
 [project.scripts]
 dscan = "dscan.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dscan"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "tests/",
+  "examples/",
+  ".github/",
+  "*.md",
+]
+# python -m build builds the wheel from the sdist, and readme = "README.md"
+# requires the file to be present, so keep it in the sdist.
+force-include = { "README.md" = "README.md" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -56,6 +56,16 @@
     pre { background: #0f1115; color: #e5e7eb; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; margin: 0; line-height: 1.5; }
     .redacted { color: var(--accent); font-weight: 700; }
     .reason { color: var(--accent); font-size: 12px; margin-top: 10px; font-weight: 600; }
+    /* Trail (CWAT) findings */
+    #s-critical { color: #6b7280; }
+    #s-critical.on { color: #E24B4A; }
+    .trail { padding: 0 15px 10px; display: flex; flex-direction: column; gap: 4px; }
+    .trail-finding { font-size: 12px; font-weight: 700; }
+    .trail-finding.critical { color: #E24B4A; }
+    .trail-finding.high { color: #BA7517; }
+    .trail-finding.medium { color: #B7770D; }
+    .trail-finding.low { color: #6b7280; }
+    .trail-finding .conf { font-weight: 500; color: #6b7280; }
   </style>
 </head>
 <body>
@@ -65,6 +75,7 @@
       <div class="stat"><span class="n" id="s-calls">0</span><span class="l">calls today</span></div>
       <div class="stat"><span class="n" id="s-flagged">0</span><span class="l">flagged</span></div>
       <div class="stat"><span class="n" id="s-agents">0</span><span class="l">agents active</span></div>
+      <div class="stat"><span class="n" id="s-critical">0</span><span class="l">critical</span></div>
     </div>
     <div class="sidebar" id="sidebar"></div>
     <div class="content" id="content"><div class="empty">Select a session to view its tool calls</div></div>
@@ -106,12 +117,31 @@
       return arr;
     }
 
+    const SEV_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
+    const TRAIL_BORDER = { critical: "#E24B4A", high: "#BA7517", medium: "#B7770D", low: "#6b7280" };
+
+    const trailFindings = (c) => (c.trail_findings || []).filter(Boolean);
+
+    function topTrailSeverity(findings) {
+      if (!findings.length) return null;
+      return findings.reduce(
+        (a, b) => ((SEV_RANK[b.severity] || 0) > (SEV_RANK[a.severity] || 0) ? b : a)
+      ).severity;
+    }
+
     function renderStats() {
       const d = today();
       const todays = traces.filter((t) => (t.ts || "").slice(0, 10) === d);
       document.getElementById("s-calls").textContent = todays.length;
       document.getElementById("s-flagged").textContent = traces.filter((t) => t.flagged).length;
       document.getElementById("s-agents").textContent = new Set(todays.map((t) => t.agent)).size;
+      const critical = todays.reduce(
+        (n, t) => n + trailFindings(t).filter((f) => f.severity === "critical").length,
+        0
+      );
+      const cEl = document.getElementById("s-critical");
+      cEl.textContent = critical;
+      cEl.classList.toggle("on", critical > 0);
     }
 
     function renderSidebar(sessions) {
@@ -141,6 +171,11 @@
         const key = sess.session_id + ":" + i;
         const el = document.createElement("div");
         el.className = "call" + (c.flagged ? " flagged" : "") + (openCalls.has(key) ? " open" : "");
+        const findings = trailFindings(c);
+        const topSev = topTrailSeverity(findings);
+        if (topSev) {
+          el.style.borderLeft = "4px solid " + (TRAIL_BORDER[topSev] || "#6b7280");
+        }
         const head = document.createElement("div");
         head.className = "call-head";
         head.innerHTML =
@@ -158,6 +193,20 @@
           el.classList.toggle("open");
         };
         el.appendChild(head);
+        if (findings.length) {
+          const tr = document.createElement("div");
+          tr.className = "trail";
+          tr.innerHTML = findings
+            .map(
+              (f) =>
+                '<div class="trail-finding ' + esc(f.severity) + '">&#9873; ' +
+                esc(f.pattern) +
+                ' <span class="conf">(' + esc(f.severity) + " &middot; " +
+                Math.round((f.confidence || 0) * 100) + "% confidence)</span></div>"
+            )
+            .join("");
+          el.appendChild(tr);
+        }
         el.appendChild(body);
         content.appendChild(el);
       });

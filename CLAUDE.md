@@ -23,3 +23,5 @@
 - Do not ask clarifying questions mid-prompt — use best judgment
 - Do not summarise what you just did at the end — just stop
 - Do not offer alternatives unless explicitly asked
+- Do not start background tasks (dashboard servers etc) during test runs or coverage checks
+- Do not leave background processes running after a prompt completes

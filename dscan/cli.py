@@ -1,4 +1,12 @@
-"""dscan command-line interface."""
+"""dscan command-line interface.
+
+Defines the ``dscan`` Click command group and its subcommands: ``scan``
+(static prompt/MCP analysis via :mod:`dscan.scanner`), ``trail``
+(call-chain detection via :mod:`dscan.trail`), ``dashboard`` (launches
+:mod:`dscan.dashboard.server`), and ``watch`` (a usage reminder). All
+output is rendered with ``rich``. The package entry point ``dscan``
+resolves to :func:`main`.
+"""
 
 from __future__ import annotations
 

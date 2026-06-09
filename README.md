@@ -1,9 +1,25 @@
 # dscan
 
-Security observability for AI agents. Wrap your agent in one decorator and
-every tool call is traced, with secrets redacted before they ever touch disk.
-Statically scan your prompts and MCP configs for risky patterns. Inspect it all
-in a local dashboard.
+[![CI](https://github.com/DeepScan-Security/dscan/actions/workflows/ci.yml/badge.svg)](https://github.com/DeepScan-Security/dscan/actions/workflows/ci.yml)
+![coverage](https://img.shields.io/badge/coverage-97%25-brightgreen)
+[![PyPI](https://img.shields.io/pypi/v/dscan-security)](https://pypi.org/project/dscan-security/)
+[![Python](https://img.shields.io/pypi/pyversions/dscan-security)](https://pypi.org/project/dscan-security/)
+![license](https://img.shields.io/badge/license-MIT-green)
+
+An open source agent security suite. Trace and redact your agent's tool
+calls, scan its prompts and MCP configs, and detect suspicious call
+chains — then inspect everything in a local dashboard.
+
+```bash
+pip install dscan-security
+```
+
+The package installs as `dscan-security`; the import path and CLI stay
+`dscan` (`import dscan`, `dscan --help`).
+
+![dscan dashboard](docs/dashboard.png)
+
+## Quick start
 
 ```python
 from dscan import watch
@@ -13,153 +29,96 @@ async def my_agent(task: str):
     ...  # your agent code, unchanged
 ```
 
-```bash
-dscan dashboard   # http://localhost:4321
-```
-
-![dscan dashboard](docs/dashboard.png)
-
----
-
-## Why
-
-Agents call tools with real arguments — file paths, API keys, database URLs,
-customer emails. Most of that flows through logs and traces in plaintext. dscan
-sits between your agent and its tools: it records what happened, redacts the
-sensitive parts, and flags the calls worth looking at — without changing a
-single byte of what your agent actually sends or receives.
-
-## Install
-
-dscan targets **Python 3.11+**.
-
-```bash
-pip install dscan            # once published to PyPI
-```
-
-Or from source:
-
-```bash
-git clone https://github.com/DeepScan-Security/dscan
-cd dscan
-pip install -e .
-```
-
-## Quick start
-
-Decorate your async agent with `@watch`, and any tool with `@watch.tool`:
-
-```python
-from dscan import watch
-
-@watch.tool
-async def query_db(sql: str, connection: str) -> dict:
-    ...
-
-@watch
-async def my_agent(task: str):
-    return await query_db(
-        sql="SELECT * FROM users",
-        connection="postgresql://admin:s3cr3t@db/prod",
-    )
-```
-
-Run it, then explore the traces:
+Run your agent, then open the dashboard:
 
 ```bash
 dscan dashboard
 ```
 
-That's it. Tool calls are written as redacted NDJSON to `~/.dscan/traces/`.
-If you use the Anthropic SDK, `@watch` also intercepts `messages.create()` and
-traces every `tool_use` block the model emits — no extra wiring.
+Tool calls are written as redacted NDJSON to `~/.dscan/traces/` (override
+with `DSCAN_TRACES_DIR`). Wrapping any tool with `@watch.tool` traces its
+params and result; if you use the Anthropic SDK, `@watch` also intercepts
+`messages.create()` and traces each `tool_use` block.
 
-## What a trace looks like
+## What dscan catches
 
-One JSON object per line. Secrets are replaced with typed placeholders, and the
-call is flagged when its parameters contained anything sensitive:
-
-```json
-{"ts":"2026-06-09T03:16:57Z","session_id":"36f9a8bc-…","agent":"my_agent",
- "tool":"store_data","params":{"key":"api_key","value":"[REDACTED:API_KEY]"},
- "result":{"stored":true},"duration_ms":4,"flagged":true,
- "flag_reason":"secrets_in_params"}
-```
-
-The agent still received the real value — only the **trace** is redacted.
-
-## What it detects
-
-| Component | What it catches |
+| Capability | What it detects |
 | --- | --- |
-| **Redactor** | AWS keys, Anthropic/OpenAI/GitHub/Stripe tokens, JWTs, emails, phone numbers, SSNs, Luhn-valid credit cards, and arbitrary high-entropy secrets |
-| **`@watch`** | every tool call's name, params, result, and duration; flags any call whose params contain a secret |
-| **`dscan scan`** | risky system prompts and misconfigured MCP servers (see rules below) |
-| **Dashboard** | sessions, per-call timeline, redacted params/results, flagged calls |
-
-### Scan rules
-
-```bash
-dscan scan ./
-```
-
-| Rule | Severity | Detects |
-| --- | --- | --- |
-| `SP001` | high | Overly permissive prompt ("do anything", "no restrictions", "ignore previous") |
-| `SP002` | high | Reads from an untrusted source (email, web, user input) with no sanitization |
-| `SP003` | high | Hardcoded API key / token in the prompt |
-| `SP004` | medium | Grants access to more than five tool categories |
-| `MC001` | medium | MCP server on an unverified host with no pinned version |
-| `MC002` | high | MCP server granting write + delete + execute together |
-| `MC003` | high | Hardcoded credentials in an MCP config |
-
-`dscan scan` reads `mcp.json`, `claude_desktop_config.json`, `.cursor/mcp.json`,
-and any `.txt` / `.md` prompt files in the target directory. It prints findings
-grouped by severity (highest first) and **exits `1` if any high-severity issue
-is found** — drop it into CI as a gate.
+| `@watch` (tracing) | Every tool call — name, params, result, duration — written as redacted NDJSON; flags calls whose params contain secrets |
+| Redaction | AWS keys, Anthropic/OpenAI/GitHub/Stripe tokens, JWTs, emails, phone numbers, SSNs, Luhn-valid credit cards, database-URL passwords, high-entropy secrets |
+| `dscan scan` | Permissive prompts, injection-prone prompts, hardcoded secrets, excessive tool scope; unverified, overprivileged, and credential-leaking MCP servers |
+| `dscan trail` | Suspicious tool-call sequences across an agent run (exfiltration, recon, injection relay, data staging, goal drift) |
+| `dscan dashboard` | Local web UI: sessions, per-call timeline, redacted values, secrets flags, and trail findings |
 
 ## Commands
 
-```bash
-dscan scan ./                   # scan prompts and MCP configs in a directory
-dscan scan --prompt prompt.txt  # scan a single system-prompt file
-dscan watch                     # reminder: @watch is a decorator, not a command
-dscan dashboard                 # start the dashboard at localhost:4321
-dscan dashboard --port 4322     # custom port
-dscan dashboard --no-open       # don't open a browser
-dscan --version
+### `dscan scan`
+
+Static analysis of system prompts and MCP config files in a directory.
+Exits `1` if any high-severity issue is found.
+
+```text
+$ dscan scan ./prompts
+                                  HIGH (1)
+┏━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┓
+┃ Rule  ┃ File   ┃ Line ┃ Message                     ┃ Snippet           ┃
+┡━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━┩
+│ SP003 │ sp.txt │    2 │ Hardcoded secret in prompt  │ ...sk-ant-api03... │
+└───────┴────────┴──────┴─────────────────────────────┴───────────────────┘
+✗ 1 high-severity finding(s).
 ```
 
-## How it works
+### `dscan watch`
 
-`@watch` wraps your async agent and records every tool call — whether it comes
-from the Anthropic SDK's `tool_use` blocks or a `@watch.tool`-wrapped function —
-redacting params and results on a deep copy so the agent's real data is never
-mutated. Traces are appended as NDJSON to `~/.dscan/traces/` (override with
-`DSCAN_TRACES_DIR`), one file per agent per day. `dscan scan` is a separate
-static pass over prompts and MCP configs, and `dscan dashboard` is a dependency-
-free local web UI that reads the same trace files.
+`@watch` is a decorator, not a runtime command. This prints a reminder:
 
-## Configuration
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `DSCAN_TRACES_DIR` | `~/.dscan/traces` | Where traces are read/written |
-| `DSCAN_AGENT_NAME` | function name | Overrides the agent name in traces |
-
-`@watch(name="custom")` overrides the agent name explicitly and takes precedence
-over `DSCAN_AGENT_NAME`.
-
-## Try the demo
-
-```bash
-python examples/demo_agent.py --mock
+```text
+$ dscan watch
+⚠ Add @watch to your agent function. See README for usage.
 ```
 
-Runs an agent through five tool calls — two carrying fake secrets — and prints a
-summary of what was traced and flagged. No API key required.
+### `dscan trail`
 
-## Development
+Reads trace files and reports suspicious tool-call chains, grouped by
+severity. Exits `1` on any high or critical finding. Supports
+`--min-severity {low|medium|high|critical}` and `--json`.
+
+```text
+$ dscan trail ~/.dscan/traces/
+┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Severity ┃ Pattern         ┃ Tools Involved          ┃ Message       ┃ Confidence ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ CRITICAL │ INJECTION_RELAY │ search_web → send_email │ untrusted...  │        85% │
+│ HIGH     │ EXFIL_SEQUENCE  │ read_file → send_email  │ read then...  │        80% │
+└──────────┴─────────────────┴─────────────────────────┴───────────────┴────────────┘
+2 findings across 5 tool calls analysed
+```
+
+### `dscan dashboard`
+
+Serves the local web UI at `localhost:4321`. `--port` sets the port;
+`--no-open` skips opening a browser.
+
+```text
+$ dscan dashboard --no-open
+✓ Dashboard at http://127.0.0.1:4321  (Ctrl-C to stop)
+```
+
+## How trail works
+
+`dscan trail` reads your trace files and looks at the order of tool
+calls, not just each call on its own. It groups calls by agent run and
+reports five kinds of suspicious sequences: reading sensitive data and
+then sending it somewhere external (exfiltration), probing for
+permissions and then running a tool the agent never declared
+(reconnaissance), pulling in untrusted web or email content and then
+immediately sending or executing (injection relay), reading several
+different sensitive sources in a row with nothing sent in between (data
+staging), and taking destructive or outbound actions that a read-only
+goal never asked for (goal drift). Each finding carries a severity and a
+confidence score so you can triage.
+
+## Contributing
 
 ```bash
 git clone https://github.com/DeepScan-Security/dscan
@@ -168,13 +127,9 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Built test-first throughout; coverage stays at or above 80% (currently ~95%).
-CI runs the suite on Python 3.11–3.14.
-
-## Security
-
-dscan is a security tool, so we hold it to that bar. To report a vulnerability,
-see [SECURITY.md](SECURITY.md) — please don't open a public issue.
+Built test-first; coverage stays at or above 80%. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for what we need help with, and
+[SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 

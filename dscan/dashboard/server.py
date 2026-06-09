@@ -106,13 +106,20 @@ def build_sessions(traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def compute_stats(traces: list[dict[str, Any]]) -> dict[str, int]:
-    """Top-bar stats: calls today, total flagged, agents active today."""
+    """Top-bar stats: calls today, total flagged, agents active, and the
+    count of CRITICAL trail findings today (distinct from secrets flags)."""
     today = _utc_today()
     todays = [t for t in traces if str(t.get("ts") or "").startswith(today)]
     return {
         "total_calls_today": len(todays),
         "flagged": sum(1 for t in traces if t.get("flagged")),
         "agents_active": len({t.get("agent") for t in todays}),
+        "critical": sum(
+            1
+            for t in todays
+            for f in (t.get("trail_findings") or [])
+            if isinstance(f, dict) and f.get("severity") == "critical"
+        ),
     }
 
 
