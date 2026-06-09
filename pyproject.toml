@@ -41,6 +41,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Prompt-injection firewall (dscan shield). Optional because LlamaFirewall
+# pulls in torch + transformers; the shield's offline regex layer works
+# without it, and online use prompts for `dscan shield --setup`.
+shield = [
+  "llamafirewall>=1.0.3",
+]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",

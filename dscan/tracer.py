@@ -91,6 +91,8 @@ class Tracer:
         flag_reason: str | None = None,
         ts: str | None = None,
         trail_findings: list[Any] | None = None,
+        blocked: bool | None = None,
+        block_reason: str | None = None,
     ) -> dict[str, Any]:
         """Append one trace entry and return it.
 
@@ -114,6 +116,10 @@ class Tracer:
         }
         if trail_findings is not None:
             entry["trail_findings"] = trail_findings
+        if blocked is not None:
+            entry["blocked"] = bool(blocked)
+        if block_reason is not None:
+            entry["block_reason"] = block_reason
         await self._append(entry)
         return entry
 

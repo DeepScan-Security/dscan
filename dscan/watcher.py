@@ -51,11 +51,19 @@ _current_session: contextvars.ContextVar["_Session | None"] = contextvars.Contex
 class _Session:
     """Per-``@watch``-invocation state."""
 
-    def __init__(self, tracer: Tracer, trail: Any | None = None) -> None:
+    def __init__(
+        self,
+        tracer: Tracer,
+        trail: Any | None = None,
+        shield: Any | None = None,
+    ) -> None:
         self.tracer = tracer
         # Optional TrailAnalyzer; when set, each recorded tool call is fed
         # to it and any findings are attached to the trace.
         self.trail = trail
+        # Optional ShieldMiddleware; when set, each tool call is screened
+        # for prompt injection before it executes.
+        self.shield = shield
         # Tasks for traces scheduled from synchronous call sites; awaited
         # before the agent wrapper returns.
         self.pending: list[asyncio.Task[Any]] = []
@@ -122,6 +130,10 @@ async def _finalize(
             flagged = True
             flag_reason = f"trail:{critical.pattern}"
 
+    # When a shield is active, every executed call is explicitly marked as
+    # not blocked (blocked calls are recorded separately by _emit_blocked).
+    blocked = False if session.shield is not None else None
+
     await session.tracer.record(
         tool=tool,
         params=red_params,
@@ -130,6 +142,26 @@ async def _finalize(
         flagged=flagged,
         flag_reason=flag_reason,
         trail_findings=trail_findings,
+        blocked=blocked,
+    )
+
+
+async def _emit_blocked(
+    session: _Session, *, tool: str, params: Any, shield_result: Any
+) -> None:
+    """Record a tool call that the shield blocked (the tool did not run)."""
+    red_params, _ = _redact_and_flag(params)
+    scanner = getattr(shield_result, "scanner", None)
+    category = getattr(shield_result, "category", None) or "block"
+    await session.tracer.record(
+        tool=tool,
+        params=red_params,
+        result=None,
+        duration_ms=0,
+        flagged=True,
+        flag_reason=f"shield:{scanner}",
+        blocked=True,
+        block_reason=f"{category}:{scanner}",
     )
 
 
@@ -248,6 +280,17 @@ def _watch_tool(func: Callable[..., Any]) -> Callable[..., Any]:
             if session is None:
                 return await func(*args, **kwargs)
             params = _bind_params(func, args, kwargs)
+            if session.shield is not None:
+                blocked = session.shield.shield_check(func.__name__, params)
+                if blocked.blocked:
+                    await _emit_blocked(
+                        session, tool=func.__name__, params=params, shield_result=blocked
+                    )
+                    from dscan.shield import ShieldBlockedError
+
+                    raise ShieldBlockedError(
+                        f"Tool call blocked by dscan shield: {blocked.reason}"
+                    )
             start = time.perf_counter()
             result = await func(*args, **kwargs)
             await _emit(
@@ -267,6 +310,28 @@ def _watch_tool(func: Callable[..., Any]) -> Callable[..., Any]:
         if session is None:
             return func(*args, **kwargs)
         params = _bind_params(func, args, kwargs)
+        if session.shield is not None:
+            blocked = session.shield.shield_check(func.__name__, params)
+            if blocked.blocked:
+                try:
+                    loop = asyncio.get_running_loop()
+                    session.pending.append(
+                        loop.create_task(
+                            _emit_blocked(
+                                session,
+                                tool=func.__name__,
+                                params=params,
+                                shield_result=blocked,
+                            )
+                        )
+                    )
+                except RuntimeError:
+                    pass
+                from dscan.shield import ShieldBlockedError
+
+                raise ShieldBlockedError(
+                    f"Tool call blocked by dscan shield: {blocked.reason}"
+                )
         start = time.perf_counter()
         result = func(*args, **kwargs)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -298,6 +363,7 @@ def watch(
     *,
     name: str | None = None,
     trail: Any | None = None,
+    shield: Any | None = None,
 ) -> Callable[..., Any]:
     """Instrument an async agent function.
 
@@ -309,9 +375,14 @@ def watch(
     analysis: each traced call is fed to the analyzer, findings are
     attached to the trace under ``trail_findings``, and a CRITICAL
     finding flags the entry with ``flag_reason="trail:<PATTERN>"``.
+
+    Pass ``shield=ShieldMiddleware(...)`` to screen each tool call for
+    prompt injection before it runs. A blocked call is not executed; its
+    trace records ``blocked=True`` and the agent receives a
+    ``ShieldBlockedError``.
     """
     if func is None:
-        return functools.partial(watch, name=name, trail=trail)
+        return functools.partial(watch, name=name, trail=trail, shield=shield)
 
     if not inspect.iscoroutinefunction(func):
         raise TypeError(
@@ -322,7 +393,7 @@ def watch(
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         agent_name = name or os.environ.get("DSCAN_AGENT_NAME") or func.__name__
-        session = _Session(Tracer(agent_name), trail=trail)
+        session = _Session(Tracer(agent_name), trail=trail, shield=shield)
         token = _current_session.set(session)
         _activate_sdk_patch()
         try:
