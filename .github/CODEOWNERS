@@ -1,0 +1,6 @@
+# Default reviewer for everything.
+* @surya-deepscan
+
+# Security-critical modules — never merge without owner review.
+dscan/redactor.py @surya-deepscan
+dscan/tracer.py @surya-deepscan

@@ -29,3 +29,9 @@ jobs:
 
       - name: Run tests with coverage
         run: pytest --cov=dscan --cov-report=term-missing --cov-fail-under=80
+
+      - name: Check for secrets in code
+        run: pip install detect-secrets && detect-secrets scan --all-files
+
+      - name: Security audit of dependencies
+        run: pip install safety && safety check

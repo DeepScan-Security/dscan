@@ -1,17 +1,28 @@
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.key
+dscan.yml          # local user config — never commit
+
+# dscan traces — never commit user data
+~/.dscan/
+.dscan/
+traces/
+
 # Python
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
-*.egg-info/
-*.egg
-build/
-dist/
-.eggs/
-
-# Virtual environments
 .venv/
 venv/
 env/
+build/
+dist/
+.eggs/
+*.egg
+*.egg-info/
 
 # Tooling caches
 .pytest_cache/
@@ -23,7 +34,10 @@ coverage.xml
 .ruff_cache/
 .uv/
 
-# Editors / OS
-.idea/
+# IDE
 .vscode/
+.idea/
+.cursor/
+
+# OS
 .DS_Store

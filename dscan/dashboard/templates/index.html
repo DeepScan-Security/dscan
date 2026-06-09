@@ -3,12 +3,182 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>dscan dashboard</title>
+  <title>dscan</title>
+  <style>
+    :root {
+      --bg: #0f1115; --side: #161922; --line: #242837;
+      --text: #e5e7eb; --muted: #9ca3af;
+      --accent: #f59e0b; --clean: #10b981;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #fff; color: #111827;
+    }
+    .app { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: auto 1fr; height: 100vh; }
+    .topbar {
+      grid-column: 1 / 3; display: flex; align-items: center; gap: 28px;
+      padding: 14px 22px; background: var(--bg); color: var(--text);
+      border-bottom: 1px solid var(--line);
+    }
+    .brand { font-weight: 700; font-size: 18px; letter-spacing: .5px; margin-right: auto; }
+    .brand span { color: var(--accent); }
+    .stat { display: flex; flex-direction: column; line-height: 1.1; }
+    .stat .n { font-size: 22px; font-weight: 700; }
+    .stat .l { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+    .sidebar { background: var(--side); color: var(--text); overflow-y: auto; padding: 10px; }
+    .session {
+      padding: 11px 12px; border-radius: 9px; cursor: pointer; margin-bottom: 5px;
+      border: 1px solid transparent;
+    }
+    .session:hover { background: #1d2230; }
+    .session.active { background: #222838; border-color: var(--accent); }
+    .session .name { font-weight: 600; font-size: 14px; }
+    .session .meta { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); margin-top: 5px; }
+    .badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+    .badge.flagged { background: rgba(245, 158, 11, .18); color: var(--accent); }
+    .badge.clean { background: rgba(16, 185, 129, .15); color: var(--clean); }
+    .content { overflow-y: auto; padding: 26px 30px; }
+    .content h2 { margin: 0 0 18px; font-size: 20px; }
+    .empty { color: #9ca3af; text-align: center; margin-top: 90px; font-size: 14px; }
+    .call { border: 1px solid #e5e7eb; border-radius: 11px; margin-bottom: 11px; overflow: hidden; transition: border-color .15s; }
+    .call.flagged { background: #fff8ec; border-color: #f5c66b; }
+    .call-head { display: flex; align-items: center; gap: 12px; padding: 13px 15px; cursor: pointer; }
+    .call-head:hover { background: rgba(0, 0, 0, .02); }
+    .tool { font-weight: 600; font-size: 14px; }
+    .chev { color: #9ca3af; font-size: 12px; transition: transform .15s; }
+    .call.open .chev { transform: rotate(90deg); }
+    .dur { margin-left: auto; color: #9ca3af; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .call-body { display: none; padding: 4px 15px 15px; }
+    .call.open .call-body { display: block; }
+    .label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; margin: 10px 0 4px; }
+    pre { background: #0f1115; color: #e5e7eb; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; margin: 0; line-height: 1.5; }
+    .redacted { color: var(--accent); font-weight: 700; }
+    .reason { color: var(--accent); font-size: 12px; margin-top: 10px; font-weight: 600; }
+  </style>
 </head>
 <body>
-  <main>
-    <h1>dscan</h1>
-    <p>Agent security suite — dashboard scaffold.</p>
-  </main>
+  <div class="app">
+    <div class="topbar">
+      <div class="brand">d<span>scan</span></div>
+      <div class="stat"><span class="n" id="s-calls">0</span><span class="l">calls today</span></div>
+      <div class="stat"><span class="n" id="s-flagged">0</span><span class="l">flagged</span></div>
+      <div class="stat"><span class="n" id="s-agents">0</span><span class="l">agents active</span></div>
+    </div>
+    <div class="sidebar" id="sidebar"></div>
+    <div class="content" id="content"><div class="empty">Select a session to view its tool calls</div></div>
+  </div>
+
+  <script>
+    window.__DSCAN_TRACES__ = __DSCAN_DATA__;
+    let traces = window.__DSCAN_TRACES__ || [];
+    let selected = null;
+    let openCalls = new Set();
+
+    const today = () => new Date().toISOString().slice(0, 10);
+    const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    const isRedactedView = (obj) => /\[REDACTED:[A-Z_]+\]/.test(JSON.stringify(obj));
+
+    function highlight(obj) {
+      let json = esc(JSON.stringify(obj === undefined ? null : obj, null, 2));
+      return json.replace(/\[REDACTED:[A-Z_]+\]/g, (m) => '<span class="redacted">' + m + "</span>");
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return "";
+      return ts.replace("T", " ").replace("Z", " UTC");
+    }
+
+    function sessionsFrom(list) {
+      const map = new Map();
+      for (const t of list) {
+        const id = t.session_id || "unknown";
+        if (!map.has(id)) map.set(id, { session_id: id, agent: t.agent || "agent", ts: t.ts || "", flagged: false, calls: [] });
+        const s = map.get(id);
+        s.calls.push(t);
+        if (t.flagged) s.flagged = true;
+        if ((t.ts || "") > s.ts) s.ts = t.ts || "";
+      }
+      const arr = [...map.values()];
+      arr.forEach((s) => s.calls.sort((a, b) => (a.ts || "").localeCompare(b.ts || "")));
+      arr.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+      return arr;
+    }
+
+    function renderStats() {
+      const d = today();
+      const todays = traces.filter((t) => (t.ts || "").slice(0, 10) === d);
+      document.getElementById("s-calls").textContent = todays.length;
+      document.getElementById("s-flagged").textContent = traces.filter((t) => t.flagged).length;
+      document.getElementById("s-agents").textContent = new Set(todays.map((t) => t.agent)).size;
+    }
+
+    function renderSidebar(sessions) {
+      const sb = document.getElementById("sidebar");
+      sb.innerHTML = sessions.length ? "" : '<div class="empty">No sessions yet</div>';
+      for (const s of sessions) {
+        const el = document.createElement("div");
+        el.className = "session" + (s.session_id === selected ? " active" : "");
+        el.innerHTML =
+          '<div class="name">' + esc(s.agent) + "</div>" +
+          '<div class="meta"><span>' + esc(fmtTime(s.ts)) + "</span>" +
+          '<span class="badge ' + (s.flagged ? "flagged" : "clean") + '">' + (s.flagged ? "flagged" : "clean") + "</span></div>";
+        el.onclick = () => { selected = s.session_id; render(); };
+        sb.appendChild(el);
+      }
+    }
+
+    function renderContent(sessions) {
+      const content = document.getElementById("content");
+      const sess = sessions.find((s) => s.session_id === selected);
+      if (!sess) {
+        content.innerHTML = '<div class="empty">Select a session to view its tool calls</div>';
+        return;
+      }
+      content.innerHTML = "<h2>" + esc(sess.agent) + "</h2>";
+      sess.calls.forEach((c, i) => {
+        const key = sess.session_id + ":" + i;
+        const el = document.createElement("div");
+        el.className = "call" + (c.flagged ? " flagged" : "") + (openCalls.has(key) ? " open" : "");
+        const head = document.createElement("div");
+        head.className = "call-head";
+        head.innerHTML =
+          '<span class="chev">&#9654;</span><span class="tool">' + esc(c.tool || "?") + "</span>" +
+          (c.flagged ? '<span class="badge flagged">flagged</span>' : "") +
+          '<span class="dur">' + (c.duration_ms || 0) + " ms</span>";
+        const body = document.createElement("div");
+        body.className = "call-body";
+        body.innerHTML =
+          '<div class="label">params</div><pre>' + highlight(c.params) + "</pre>" +
+          '<div class="label">result</div><pre>' + highlight(c.result) + "</pre>" +
+          (c.flag_reason ? '<div class="reason">&#9873; ' + esc(c.flag_reason) + "</div>" : "");
+        head.onclick = () => {
+          if (openCalls.has(key)) openCalls.delete(key); else openCalls.add(key);
+          el.classList.toggle("open");
+        };
+        el.appendChild(head);
+        el.appendChild(body);
+        content.appendChild(el);
+      });
+    }
+
+    function render() {
+      const sessions = sessionsFrom(traces);
+      renderStats();
+      renderSidebar(sessions);
+      renderContent(sessions);
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch("/api/traces");
+        if (r.ok) { traces = await r.json(); render(); }
+      } catch (e) { /* keep last good state */ }
+    }
+
+    render();
+    setInterval(refresh, 5000);
+  </script>
 </body>
 </html>
