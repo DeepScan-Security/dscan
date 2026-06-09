@@ -15,6 +15,6 @@ behavior, then inspect everything in a local dashboard::
 
 from dscan.watcher import watch
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 __all__ = ["watch", "__version__"]
