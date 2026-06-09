@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from .detector import AttackDetector, DetectionResult
 from .generator import LLMPayloadGenerator, PayloadGenerator
+from .http_target import HttpResponse, HttpTarget
 from .models import (
     AgentContext,
     AgentTool,
@@ -42,4 +43,6 @@ __all__ = [
     "AttackRunner",
     "attack_suite",
     "AttackReporter",
+    "HttpTarget",
+    "HttpResponse",
 ]
