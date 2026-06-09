@@ -307,6 +307,51 @@ class TestToolWrapping:
         # The dict the caller passed in must be untouched.
         assert original == {"api_key": "sk-ant-api03-secret"}
 
+    async def test_traces_sync_tool(self, traces_dir):
+        # A plain (non-async) tool function called from within an async
+        # agent: tracing is scheduled on the loop and drained on exit.
+        @watch.tool
+        def compute(x, y):
+            return {"sum": x + y, "secret": "sk-ant-api03-zzz"}
+
+        @watch
+        async def agent():
+            return compute(2, 3)
+
+        result = await agent()
+        # Transparency: caller gets the real, unredacted result.
+        assert result == {"sum": 5, "secret": "sk-ant-api03-zzz"}
+
+        entries = read_entries(traces_dir, "agent")
+        assert len(entries) == 1
+        assert entries[0]["tool"] == "compute"
+        assert entries[0]["params"] == {"x": 2, "y": 3}
+        assert entries[0]["result"] == {"sum": 5, "secret": "[REDACTED:API_KEY]"}
+        assert entries[0]["flagged"] is False
+
+    async def test_sync_tool_flags_secret_in_params(self, traces_dir):
+        @watch.tool
+        def store(api_key):
+            return "stored"
+
+        @watch
+        async def agent():
+            return store(api_key="sk-ant-api03-secret")
+
+        await agent()
+        entries = read_entries(traces_dir, "agent")
+        assert entries[0]["params"] == {"api_key": "[REDACTED:API_KEY]"}
+        assert entries[0]["flagged"] is True
+        assert entries[0]["flag_reason"] == "secrets_in_params"
+
+    async def test_sync_tool_outside_session_runs_without_tracing(self, traces_dir):
+        @watch.tool
+        def doubler(x):
+            return x * 2
+
+        assert doubler(21) == 42
+        assert trace_files(traces_dir) == []
+
     async def test_tool_outside_session_runs_without_tracing(self, traces_dir):
         @watch.tool
         async def standalone(x):
