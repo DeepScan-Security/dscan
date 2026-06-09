@@ -10,6 +10,7 @@ later work; this module exposes only the foundation.
 
 from __future__ import annotations
 
+from .detector import AttackDetector, DetectionResult
 from .generator import LLMPayloadGenerator, PayloadGenerator
 from .models import (
     AgentContext,
@@ -21,6 +22,7 @@ from .models import (
     Severity,
 )
 from .payloads import ALL_PAYLOADS, get_payloads_for_context
+from .runner import AttackRunner, attack_suite
 
 __all__ = [
     "AttackCategory",
@@ -34,4 +36,8 @@ __all__ = [
     "get_payloads_for_context",
     "PayloadGenerator",
     "LLMPayloadGenerator",
+    "AttackDetector",
+    "DetectionResult",
+    "AttackRunner",
+    "attack_suite",
 ]
