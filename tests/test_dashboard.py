@@ -248,6 +248,38 @@ class TestTrailFindings:
         send = next(c for c in data["calls"] if c["tool"] == "send_email")
         assert send["trail_findings"] == findings
 
+    async def test_api_traces_includes_blocked_fields(self, tmp_path):
+        write_ndjson(
+            tmp_path / f"{_today()}_a.ndjson",
+            [
+                entry(
+                    tool="send_data",
+                    flagged=True,
+                    blocked=True,
+                    block_reason="injection:PromptGuard",
+                )
+            ],
+        )
+        async with TestClient(TestServer(make_app(str(tmp_path)))) as client:
+            data = await (await client.get("/api/traces")).json()
+        assert data[0]["blocked"] is True
+        assert data[0]["block_reason"] == "injection:PromptGuard"
+
+    def test_compute_stats_counts_blocked_separately_from_flagged(self):
+        traces = [
+            entry(flagged=True, flag_reason="secrets_in_params"),  # flagged only
+            entry(
+                flagged=True,
+                blocked=True,
+                flag_reason="shield:PromptGuard",
+                block_reason="injection:PromptGuard",
+            ),  # blocked
+            entry(flagged=False),  # clean
+        ]
+        stats = compute_stats(traces)
+        assert stats["flagged"] == 2  # both flagged calls
+        assert stats["blocked"] == 1  # only the prevented call
+
     def test_compute_stats_counts_critical_separately_from_secrets(self):
         traces = [
             # Secrets-flagged, but NOT a trail finding.

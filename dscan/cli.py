@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -19,6 +20,7 @@ from rich.console import Console
 from rich.table import Table
 
 from dscan import __version__
+from dscan.shield import ModelNotReadyError, ShieldMiddleware
 from dscan.trail import TrailAnalyzer
 
 console = Console()
@@ -59,6 +61,104 @@ def main() -> None:
 def watch() -> None:
     """Show how to instrument an agent (it's a decorator, not a command)."""
     _warn("Add @watch to your agent function. See README for usage.")
+
+
+@main.group(invoke_without_command=True)
+@click.option(
+    "--setup",
+    "do_setup",
+    is_flag=True,
+    help="Download LlamaFirewall models to ~/.dscan/models/.",
+)
+@click.pass_context
+def shield(ctx: click.Context, do_setup: bool) -> None:
+    """Prompt-injection firewall for agent tool calls."""
+    if do_setup:
+        middleware = ShieldMiddleware()
+        if middleware._models_present():
+            _ok("Models already installed")
+            return
+        middleware.setup()
+        _ok("Shield models ready")
+        return
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+@shield.command("check")
+@click.argument("text", required=False)
+@click.option(
+    "--mode",
+    type=click.Choice(["input", "output", "both", "tool_results"]),
+    default="both",
+    show_default=True,
+    help="Which trust boundary the text crosses.",
+)
+@click.option("--offline", is_flag=True, default=False, help="Regex only, no model.")
+@click.option(
+    "--scanner",
+    type=click.Choice(["promptguard", "alignmentcheck", "all"]),
+    default="all",
+    show_default=True,
+    help="Model scanner(s) to use (advisory; the engine runs its full set).",
+)
+@click.option("--stdin", "use_stdin", is_flag=True, default=False, help="Read text from stdin.")
+def shield_check(text: str | None, mode: str, offline: bool, scanner: str, use_stdin: bool) -> None:
+    """Scan TEXT for prompt injection."""
+    if use_stdin:
+        text = sys.stdin.read().strip()
+    if not text:
+        _err("no text provided (pass an argument or use --stdin)")
+        sys.exit(2)
+
+    start = time.perf_counter()
+    middleware = ShieldMiddleware(mode=mode, offline=offline)
+    try:
+        result = middleware.scan(text, source="input")
+        fell_back = False
+    except ModelNotReadyError:
+        # Models aren't installed — fall back to the always-on regex layer.
+        middleware = ShieldMiddleware(mode=mode, offline=True)
+        result = middleware.scan(text, source="input")
+        fell_back = True
+    elapsed = time.perf_counter() - start
+
+    if result.blocked:
+        console.print(f"[red]✗ Blocked: {result.category or 'injection'}[/red]")
+        console.print(f"  Scanner: {result.scanner}")
+        console.print(f"  Reason: {result.reason}")
+        console.print(f"  Confidence: {round((result.confidence or 0.0) * 100)}%")
+        if fell_back:
+            console.print("[dim](offline patterns — run dscan shield --setup for model coverage)[/dim]")
+        sys.exit(1)
+
+    console.print(f"[green]✓ Clean[/green] ({elapsed:.2f}s)")
+    if fell_back:
+        console.print("[dim](offline patterns — run dscan shield --setup for model coverage)[/dim]")
+
+
+@shield.command("status")
+def shield_status() -> None:
+    """Show shield configuration and model status."""
+    import importlib.util
+
+    from dscan.shield import _OFFLINE_PATTERNS
+
+    middleware = ShieldMiddleware()
+    models_ready = bool(middleware._models_present())
+    llamafirewall = importlib.util.find_spec("llamafirewall") is not None
+
+    table = Table(title="dscan shield", header_style="bold", title_justify="left")
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row("Models installed", "[green]yes[/green]" if models_ready else "[#f59e0b]no[/#f59e0b]")
+    table.add_row("Mode", "both")
+    table.add_row("Offline patterns", f"{len(_OFFLINE_PATTERNS)} active")
+    table.add_row(
+        "LlamaFirewall",
+        "[green]available[/green]" if llamafirewall else "not installed",
+    )
+    console.print(table)
 
 
 @main.command()

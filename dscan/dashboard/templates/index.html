@@ -66,6 +66,12 @@
     .trail-finding.medium { color: #B7770D; }
     .trail-finding.low { color: #6b7280; }
     .trail-finding .conf { font-weight: 500; color: #6b7280; }
+    /* Shield: blocked calls (prevented, not just flagged) */
+    #s-blocked { color: #6b7280; }
+    #s-blocked.on { color: #DC2626; }
+    .badge.blocked { background: rgba(220, 38, 38, .15); color: #DC2626; }
+    .shield-finding { font-size: 12px; font-weight: 700; color: #DC2626; }
+    .shield-finding .meta { font-weight: 500; color: #6b7280; }
   </style>
 </head>
 <body>
@@ -76,6 +82,7 @@
       <div class="stat"><span class="n" id="s-flagged">0</span><span class="l">flagged</span></div>
       <div class="stat"><span class="n" id="s-agents">0</span><span class="l">agents active</span></div>
       <div class="stat"><span class="n" id="s-critical">0</span><span class="l">critical</span></div>
+      <div class="stat"><span class="n" id="s-blocked">0</span><span class="l">blocked</span></div>
     </div>
     <div class="sidebar" id="sidebar"></div>
     <div class="content" id="content"><div class="empty">Select a session to view its tool calls</div></div>
@@ -142,6 +149,11 @@
       const cEl = document.getElementById("s-critical");
       cEl.textContent = critical;
       cEl.classList.toggle("on", critical > 0);
+
+      const blocked = todays.filter((t) => t.blocked === true).length;
+      const bEl = document.getElementById("s-blocked");
+      bEl.textContent = blocked;
+      bEl.classList.toggle("on", blocked > 0);
     }
 
     function renderSidebar(sessions) {
@@ -173,14 +185,22 @@
         el.className = "call" + (c.flagged ? " flagged" : "") + (openCalls.has(key) ? " open" : "");
         const findings = trailFindings(c);
         const topSev = topTrailSeverity(findings);
-        if (topSev) {
+        if (c.blocked === true) {
+          el.style.borderLeft = "5px solid #DC2626"; // strongest: prevented
+        } else if (topSev) {
           el.style.borderLeft = "4px solid " + (TRAIL_BORDER[topSev] || "#6b7280");
         }
         const head = document.createElement("div");
         head.className = "call-head";
+        const badge =
+          c.blocked === true
+            ? '<span class="badge blocked">BLOCKED</span>'
+            : c.flagged
+            ? '<span class="badge flagged">flagged</span>'
+            : "";
         head.innerHTML =
           '<span class="chev">&#9654;</span><span class="tool">' + esc(c.tool || "?") + "</span>" +
-          (c.flagged ? '<span class="badge flagged">flagged</span>' : "") +
+          badge +
           '<span class="dur">' + (c.duration_ms || 0) + " ms</span>";
         const body = document.createElement("div");
         body.className = "call-body";
@@ -193,7 +213,18 @@
           el.classList.toggle("open");
         };
         el.appendChild(head);
-        if (findings.length) {
+        if (c.blocked === true) {
+          const parts = String(c.block_reason || "injection:shield").split(":");
+          const category = parts[0] || "injection";
+          const scanner = parts[1] || "shield";
+          const sh = document.createElement("div");
+          sh.className = "trail";
+          sh.innerHTML =
+            '<div class="shield-finding">&#128737; Blocked by shield: ' +
+            esc(category) +
+            ' <span class="meta">(' + esc(scanner) + ")</span></div>";
+          el.appendChild(sh);
+        } else if (findings.length) {
           const tr = document.createElement("div");
           tr.className = "trail";
           tr.innerHTML = findings

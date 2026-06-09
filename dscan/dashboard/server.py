@@ -120,6 +120,9 @@ def compute_stats(traces: list[dict[str, Any]]) -> dict[str, int]:
             for f in (t.get("trail_findings") or [])
             if isinstance(f, dict) and f.get("severity") == "critical"
         ),
+        # Blocked = prevented by the shield (distinct from flagged = detected
+        # but allowed through).
+        "blocked": sum(1 for t in todays if t.get("blocked") is True),
     }
 
 
