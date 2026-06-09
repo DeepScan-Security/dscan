@@ -17,7 +17,7 @@ pip install dscan-security
 The package installs as `dscan-security`; the import path and CLI stay
 `dscan` (`import dscan`, `dscan --help`).
 
-![dscan dashboard](docs/dashboard.png)
+![dscan dashboard](https://raw.githubusercontent.com/DeepScan-Security/dscan/main/docs/dashboard.png)
 
 ## Quick start
 
